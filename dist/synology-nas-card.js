@@ -733,11 +733,6 @@ class SynologyNasCard extends HTMLElement {
 
     const raid = this._raidType(i);
 
-    const status = this._s(statusId) || attrVol?.status || "normal";
-    const avgT = this._n(this._e(`volume_${i}_average_disk_temp`)) || this._n(`sensor.${p}_volume_${i}_average_disk_temp`);
-    const maxT = this._n(this._e(`volume_${i}_maximum_disk_temp`)) || this._n(`sensor.${p}_volume_${i}_maximum_disk_temp`);
-    const raid = this._raidType(i);
-
     let bc = "var(--success-color,#4caf50)";
     if (pct != null) {
       if (pct >= 90)      bc = "var(--error-color,#f44336)";
