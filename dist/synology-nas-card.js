@@ -1,3 +1,12 @@
+import {
+  SYNOLOGY_CORES,
+  SYNOLOGY_PANEL_DEFS,
+  generateDynamicPanelDef,
+  findPanelDef,
+  detectCoresFromModel,
+  getSynologyHardware,
+} from './synology-hardware-utils.js';
+
 /**
  * Synology NAS Monitoring Card — Custom Lovelace Card for Home Assistant
  * Visualizes Synology NAS status using the native Synology DSM integration.
@@ -221,114 +230,8 @@ function detectVolumes(hass, pfx) {
   return [...ids].sort((a, b) => a - b);
 }
 
-/* Known Synology models → CPU core count. */
-const SYNOLOGY_CORES = {
-  "DS220+": 2, "DS224+": 2, "DS223": 2, "DS223j": 2, "DS120j": 2, "DS124": 2,
-  "DS720+": 2, "DS723+": 2, "DS423+": 2, "DS423": 4, "DS224": 2,
-  "DS418": 4, "DS418play": 2, "DS420+": 2, "DS420j": 4,
-  "DS920+": 4, "DS923+": 4, "DS1019+": 4, "DS1522+": 4,
-  "DS1618+": 4, "DS1621+": 4, "DS1621xs+": 4, "DS1622xs+": 4,
-  "DS1819+": 4, "DS1821+": 4, "DS1823xs+": 8,
-  "DS2419+": 4, "DS2422+": 4, "DS3617xs": 4, "DS3617xsII": 8,
-  "DS3622xs+": 12, "DS3018xs": 4, "DS2419+II": 4,
-  "RS1221+": 4, "RS1221RP+": 4, "RS1619xs+": 4, "RS2421+": 4, "RS2421RP+": 4,
-  "RS2423+": 4, "RS2423RP+": 4, "RS3621xs+": 8, "RS3621RPxs": 8, "RS4021xs+": 8,
-  "RS422+": 2, "RS822+": 2, "RS820+": 4, "RS3618xs": 4,
-  "FS2500": 8, "FS3400": 8, "FS3600": 12, "FS6400": 16, "FS3410": 8, "FS6410": 16,
-};
-
-function _makeHddRow(startX, y, w, h, gap, count, startSlot) {
-  return Array.from({ length: count }, (_, i) => ({
-    x: startX + i * (w + gap), y, w, h,
-    type: "hdd", slot: startSlot + i,
-  }));
-}
-
-const SYNOLOGY_PANEL_DEFS = {
-  "DS224+": { label: "DS224+",   vw: 120, vh: 90, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
-  "DS223":  { label: "DS223",    vw: 120, vh: 90, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
-  "DS723+": { label: "DS723+",   vw: 120, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
-  "DS920+": { label: "DS920+",   vw: 200, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
-  "DS923+": { label: "DS923+",   vw: 200, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
-  "DS423+": { label: "DS423+",   vw: 200, vh: 90, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
-  "DS1019+":{ label: "DS1019+",  vw: 200, vh: 90, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
-  "DS1522+": { label: "DS1522+", vw: 244, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 45, 80, 3, 5, 1), extras: [] },
-  "DS1621+": { label: "DS1621+", vw: 286, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 44, 80, 3, 6, 1), extras: [] },
-  "DS1621xs+":{ label: "DS1621xs+", vw: 286, vh: 90, drives: _makeHddRow(4, 5, 44, 80, 3, 6, 1), extras: [] },
-  "DS1821+":  { label: "DS1821+",  vw: 400, vh: 100, m2_max: 2, drives: _makeHddRow(22, 8, 43, 84, 3, 8, 1), extras: [] },
-  "DS1823xs+":{ label: "DS1823xs+", vw: 400, vh: 100, m2_max: 2, drives: _makeHddRow(22, 8, 43, 84, 3, 8, 1), extras: [] },
-  "DS2422+":  { label: "DS2422+", vw: 560, vh: 100, drives: _makeHddRow(22, 8, 42, 84, 3, 12, 1), extras: [] },
-  "RS3621xs+": { label: "RS3621xs+", vw: 400, vh: 60, drives: _makeHddRow(4, 5, 30, 50, 2, 12, 1), extras: [] },
-};
-
-/* Dynamic generator for any bay count (1 to 60+ bays) */
-function generateDynamicPanelDef(model, hddCount) {
-  if (model && SYNOLOGY_PANEL_DEFS[model]) return SYNOLOGY_PANEL_DEFS[model];
-  const trimmed = (model || "").trim();
-  if (trimmed && SYNOLOGY_PANEL_DEFS[trimmed]) return SYNOLOGY_PANEL_DEFS[trimmed];
-
-  let cols = 4;
-  if (hddCount <= 2) cols = 2;
-  else if (hddCount <= 5) cols = hddCount;
-  else if (hddCount <= 8) cols = 4;
-  else if (hddCount <= 12) cols = 4;
-  else if (hddCount <= 16) cols = 4;
-  else if (hddCount <= 24) cols = 6;
-  else cols = 12;
-
-  const rows = Math.ceil(hddCount / cols);
-  const w = cols > 8 ? 32 : (cols > 4 ? 40 : 47);
-  const h = cols > 8 ? 50 : 75;
-  const gap = 3;
-  const totalW = cols * w + (cols - 1) * gap;
-  const vw = Math.max(140, totalW + 24);
-  const vh = rows * h + (rows - 1) * gap + 16;
-
-  const drives = [];
-  for (let i = 0; i < hddCount; i++) {
-    const r = Math.floor(i / cols);
-    const c = i % cols;
-    const startX = Math.floor((vw - totalW) / 2);
-    drives.push({
-      x: startX + c * (w + gap),
-      y: 8 + r * (h + gap),
-      w,
-      h,
-      type: "hdd",
-      slot: i + 1,
-    });
-  }
-
-  return {
-    label: model || `NAS (${hddCount}-Bay)`,
-    vw,
-    vh,
-    m2_max: hddCount <= 8 ? 2 : 0,
-    drives,
-    extras: [],
-  };
-}
-
-function findPanelDef(model, hddCount) {
-  return generateDynamicPanelDef(model, hddCount);
-}
-
-function detectCoresFromModel(hass, prefix) {
-  try {
-    const marker = `sensor.${prefix}_cpu_utilization_total`;
-    const entReg = hass?.entities?.[marker];
-    const devId  = entReg?.device_id;
-    const device = devId ? hass?.devices?.[devId] : null;
-    const model  = device?.model || "";
-    if (!model) return null;
-    if (SYNOLOGY_CORES[model]) return SYNOLOGY_CORES[model];
-    const trimmed = model.trim();
-    if (SYNOLOGY_CORES[trimmed]) return SYNOLOGY_CORES[trimmed];
-    return null;
-  } catch (_) {
-    return null;
-  }
-}
+// Hardware knowledge base is maintained in separate ES modules.
+// This card file is therefore an ES module and must be bundled for single-resource HACS deployment.
 
 function prettyName(pfx) {
   const m = pfx.match(/synology[_\s]*((?:ds|rs|fs|sa|dvr|uc)\d{3,5})/i);
