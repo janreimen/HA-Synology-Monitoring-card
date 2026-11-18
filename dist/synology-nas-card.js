@@ -721,7 +721,7 @@ class SynologyNasCard extends HTMLElement {
         ? (freeGB / 1024).toFixed(2) + " TB"
         : freeGB.toFixed(0) + " GB";
 
-    const status = this._s(statusId) || attrVol?.status || "normal";
+    const volumeStatus = this._s(statusId) || attrVol?.status || "normal";
     const avgT =
       this._n(this._e(`volume_${i}_average_disk_temp`)) ||
       this._n(`sensor.${p}_volume_${i}_average_disk_temp`);
