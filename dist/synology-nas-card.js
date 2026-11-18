@@ -633,7 +633,6 @@ class SynologyNasCard extends HTMLElement {
   }
 
   /* Unit-aware volume parser handling GB, TB, GiB, TiB, MB, PB dynamically */
-  
   _volume(i) {
     const p = this._config.entity_prefix;
 
@@ -731,9 +730,7 @@ class SynologyNasCard extends HTMLElement {
       this._n(this._e(`volume_${i}_maximum_disk_temp`)) ||
       this._n(`sensor.${p}_volume_${i}_maximum_disk_temp`);
 
-    const raid = this._raidType(i);
-
-    let bc = "var(--success-color,#4caf50)";
+    const raid = this._raidType(i);    let bc = "var(--success-color,#4caf50)";
     if (pct != null) {
       if (pct >= 90)      bc = "var(--error-color,#f44336)";
       else if (pct >= 75) bc = "var(--warning-color,#ff9800)";
