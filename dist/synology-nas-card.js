@@ -623,8 +623,8 @@ class SynologyNasCard extends HTMLElement {
 
   _raidType(i) {
     const p = this._config.entity_prefix;
-    const sid = this._e(`volume_${i}_status`) || this._e(`volume_${i}_volume_status`) || `sensor.${p}_volume_${i}_status`;
-    const attrs = this._hass?.states[sid]?.attributes || {};
+    const sid = this._firstExisting([`volume_${i}_status`, `volume_${i}_volume_status`]);
+    const attrs = (sid ? this._hass?.states[sid]?.attributes : null) || {};
     const mainState = this._hass?.states[`sensor.${p}`] || this._hass?.states[`sensor.${p}_dsm`];
     const attrVol = mainState?.attributes?.volumes?.[i - 1] || mainState?.attributes?.storage_pools?.[i - 1];
     const raw = attrs.device_type || attrs.raid_type || attrs.fs_type || attrVol?.raid_type || attrVol?.device_type || null;
@@ -632,112 +632,83 @@ class SynologyNasCard extends HTMLElement {
     return raw.replace(/_/g, " ").toUpperCase();
   }
 
+  _firstExisting(suffixes) {
+    for (const s of suffixes) {
+      const id = this._e(s);
+      if (this._hass?.states[id]) return id;
+    }
+    return null;
+  }
+
   /* Unit-aware volume parser handling GB, TB, GiB, TiB, MB, PB dynamically */
   _volume(i) {
     const p = this._config.entity_prefix;
+    const usedId = this._firstExisting([
+      `volume_${i}_used_space`,
+      `volume_${i}_size_used`,
+      `volume_${i}_used`,
+    ]);
+    const totalId = this._firstExisting([
+      `volume_${i}_total_size`,
+      `volume_${i}_size_total`,
+      `volume_${i}_total`,
+    ]);
+    const pctId = this._firstExisting([
+      `volume_${i}_volume_used`,
+      `volume_${i}_used_percent`,
+    ]);
+    const statusId = this._firstExisting([
+      `volume_${i}_status`,
+      `volume_${i}_volume_status`,
+    ]);
 
-    // Select the first entity that actually exists.
-    const findEntity = (...ids) =>
-      ids.find((id) => this._hass?.states[id]) || ids[0];
+    const usedState = usedId ? this._hass?.states[usedId] : null;
+    const totalState = totalId ? this._hass?.states[totalId] : null;
+    const mainState = this._hass?.states[`sensor.${p}`] || this._hass?.states[`sensor.${p}_dsm`];
+    const attrVol = mainState?.attributes?.volumes?.[i - 1] || mainState?.attributes?.storage_pools?.[i - 1];
 
-    // Physical storage measurements (not percentages).
-    const usedId = findEntity(
-      this._e(`volume_${i}_used_space`),
-      this._e(`volume_${i}_size_used`)
-    );
-
-    const totalId = findEntity(
-      this._e(`volume_${i}_total_size`),
-      this._e(`volume_${i}_total`)
-    );
-
-    // Percentage is a separate sensor.
-    const pctId = findEntity(
-      this._e(`volume_${i}_volume_used`)
-    );
-
-    const statusId = findEntity(
-      this._e(`volume_${i}_status`),
-      this._e(`volume_${i}_volume_status`)
-    );
-
-    const usedState = this._hass?.states[usedId];
-    const totalState = this._hass?.states[totalId];
-
-    const mainState =
-      this._hass?.states[`sensor.${p}`] ||
-      this._hass?.states[`sensor.${p}_dsm`];
-
-    const attrVol =
-      mainState?.attributes?.volumes?.[i - 1] ||
-      mainState?.attributes?.storage_pools?.[i - 1];
-
-    const usedRaw = this._n(usedId);
-    const totalRaw = this._n(totalId);
-    const pctRaw = this._n(pctId);
-
-    const usedUnit =
-      (usedState?.attributes?.unit_of_measurement || "GB").toUpperCase();
-
-    const totalUnit =
-      (totalState?.attributes?.unit_of_measurement || "GB").toUpperCase();
+    const usedRaw = usedId ? this._n(usedId) : null;
+    const totalRaw = totalId ? this._n(totalId) : null;
+    const pctRaw = pctId ? this._n(pctId) : null;
+    const usedUnit = (usedState?.attributes?.unit_of_measurement || "TB").toUpperCase();
+    const totalUnit = (totalState?.attributes?.unit_of_measurement || "TB").toUpperCase();
 
     function toGB(val, unit) {
       if (val === null) return 0;
       if (unit.includes("TB") || unit.includes("TIB")) return val * 1024;
       if (unit.includes("MB") || unit.includes("MIB")) return val / 1024;
       if (unit.includes("PB") || unit.includes("PIB")) return val * 1024 * 1024;
-      return val;
+      return val; // GB or GiB
     }
 
-    const usedGB =
-      usedRaw !== null
-        ? toGB(usedRaw, usedUnit)
-        : (attrVol ? attrVol.used / 1024 / 1024 : 0);
-
-    const totalGB =
-      totalRaw !== null
-        ? toGB(totalRaw, totalUnit)
-        : (attrVol ? attrVol.total / 1024 / 1024 : 0);
-
+    const usedGB = usedRaw !== null ? toGB(usedRaw, usedUnit) : (attrVol ? attrVol.used / 1024 / 1024 : 0);
+    const totalGB = totalRaw !== null ? toGB(totalRaw, totalUnit) : (attrVol ? attrVol.total / 1024 / 1024 : 0);
     const freeGB = Math.max(0, totalGB - usedGB);
-
-    // Trust the native percentage sensor when available.
-    const pct =
-      pctRaw !== null
-        ? pctRaw
-        : (totalGB > 0
-            ? Number(((usedGB / totalGB) * 100).toFixed(1))
-            : (attrVol?.percent ?? attrVol?.used_pct ?? null));
+    const pct = pctRaw !== null
+      ? Number(pctRaw.toFixed(1))
+      : (totalGB > 0 ? Number(((usedGB / totalGB) * 100).toFixed(1)) : (attrVol?.percent ?? attrVol?.used_pct ?? null));
 
     const displayUnit = totalGB >= 1024 ? "TB" : "GB";
     const scaleDiv = displayUnit === "TB" ? 1024 : 1;
-
     const usedVal = (usedGB / scaleDiv).toFixed(2);
     const totalVal = (totalGB / scaleDiv).toFixed(2);
+    const freeFormatted = displayUnit === "TB" ? (freeGB / 1024).toFixed(2) + " TB" : freeGB.toFixed(0) + " GB";
 
-    const freeFormatted =
-      displayUnit === "TB"
-        ? (freeGB / 1024).toFixed(2) + " TB"
-        : freeGB.toFixed(0) + " GB";
+    const status = (statusId ? this._s(statusId) : null) || attrVol?.status || "normal";
+    const avgT = this._n(this._e(`volume_${i}_average_disk_temp`));
+    const maxT = this._n(this._e(`volume_${i}_maximum_disk_temp`));
+    const raid = this._raidType(i);
 
-    const volumeStatus = this._s(statusId) || attrVol?.status || "normal";
-    const avgT =
-      this._n(this._e(`volume_${i}_average_disk_temp`)) ||
-      this._n(`sensor.${p}_volume_${i}_average_disk_temp`);
-
-    const maxT =
-      this._n(this._e(`volume_${i}_maximum_disk_temp`)) ||
-      this._n(`sensor.${p}_volume_${i}_maximum_disk_temp`);
-
-    const raid = this._raidType(i);    let bc = "var(--success-color,#4caf50)";
+    let bc = "var(--success-color,#4caf50)";
     if (pct != null) {
       if (pct >= 90)      bc = "var(--error-color,#f44336)";
       else if (pct >= 75) bc = "var(--warning-color,#ff9800)";
     }
 
+    const clickEntity = usedId || pctId || totalId || "";
+
     return `<div class="volume-card" data-volume-id="${i}">
-      <div class="volume-body" data-entity="${usedId}">
+      <div class="volume-body" data-entity="${clickEntity}">
         <div class="volume-header">
           <span class="volume-title">\ud83d\udce6 Volume ${i}</span>
           <div class="volume-badges">
@@ -761,7 +732,7 @@ class SynologyNasCard extends HTMLElement {
       </div>
     </div>`;
   }
-
+  
   _frontPanel(panelDef, hddSlots, m2Slots) {
     const { vw, vh, drives } = panelDef;
     const thr = this._config.thresholds || {};
