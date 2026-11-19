@@ -1,21 +1,12 @@
-import {
-  SYNOLOGY_CORES,
-  SYNOLOGY_PANEL_DEFS,
-  generateDynamicPanelDef,
-  findPanelDef,
-  detectCoresFromModel,
-  getSynologyHardware,
-} from './synology-hardware-utils.js';
-
 /**
  * Synology NAS Monitoring Card — Custom Lovelace Card for Home Assistant
  * Visualizes Synology NAS status using the native Synology DSM integration.
  * Extended with dynamic 1–60+ bay SVG generation, regex discovery, and unit-aware storage pools.
- * @version 0.13.1-universal
+ * @version 0.13.2-universal
  * @license MIT
  */
 
-const CARD_VERSION = "0.13.1-universal";
+const CARD_VERSION = "0.13.2-universal";
 
 console.info(
   `%c SYNOLOGY-NAS-CARD %c v${CARD_VERSION} `,
@@ -155,13 +146,137 @@ const T = {
 }[_LANG];
 
 /* ═══════════════════════════════════════════════════════════════
+   Hardware Definitions & Core Lookup (Self-Contained)
+   ═══════════════════════════════════════════════════════════════ */
+
+const SYNOLOGY_CORES = {
+  "DS118": 4, "DS120j": 2, "DS124": 2,
+  "DS218+": 2, "DS220+": 2, "DS223": 2, "DS223j": 2, "DS224": 2, "DS224+": 2,
+  "DS418": 4, "DS418play": 2, "DS420+": 2, "DS420j": 4, "DS423": 4, "DS423+": 2,
+  "DS720+": 2, "DS723+": 2,
+  "DS920+": 4, "DS923+": 4, "DS1019+": 4,
+  "DS1520+": 4, "DS1522+": 4, "DS1525+": 4,
+  "DS1618+": 4, "DS1621+": 4, "DS1621xs+": 4, "DS1622xs+": 4,
+  "DS1819+": 4, "DS1821+": 4, "DS1823xs+": 8,
+  "DS2419+": 4, "DS2419+II": 4, "DS2422+": 4,
+  "DS3018xs": 4, "DS3617xs": 4, "DS3617xsII": 8, "DS3622xs+": 12,
+  "RS422+": 2, "RS820+": 4, "RS822+": 2, "RS1221+": 4, "RS1221RP+": 4,
+  "RS1619xs+": 4, "RS2421+": 4, "RS2421RP+": 4, "RS2423+": 4, "RS2423RP+": 4,
+  "RS3618xs": 4, "RS3621xs+": 8, "RS3621RPxs": 8, "RS4021xs+": 8,
+  "FS2500": 8, "FS3400": 8, "FS3410": 8, "FS3600": 12, "FS6400": 16, "FS6410": 16,
+};
+
+function _makeHddRow(startX, y, w, h, gap, count, startSlot) {
+  return Array.from({ length: count }, (_, i) => ({
+    x: startX + i * (w + gap),
+    y,
+    w,
+    h,
+    type: "hdd",
+    slot: startSlot + i,
+  }));
+}
+
+const SYNOLOGY_PANEL_DEFS = {
+  "DS218+": { label: "DS218+", vw: 120, vh: 90, m2_max: 0, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
+  "DS220+": { label: "DS220+", vw: 120, vh: 90, m2_max: 0, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
+  "DS223":  { label: "DS223",  vw: 120, vh: 90, m2_max: 0, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
+  "DS224+": { label: "DS224+", vw: 120, vh: 90, m2_max: 0, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
+  "DS720+": { label: "DS720+", vw: 120, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
+  "DS723+": { label: "DS723+", vw: 120, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 54, 80, 4, 2, 1), extras: [] },
+  "DS420+": { label: "DS420+", vw: 200, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
+  "DS423+": { label: "DS423+", vw: 200, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
+  "DS920+": { label: "DS920+", vw: 200, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
+  "DS923+": { label: "DS923+", vw: 200, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 47, 80, 3, 4, 1), extras: [] },
+  "DS1019+": { label: "DS1019+", vw: 244, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 45, 80, 3, 5, 1), extras: [] },
+  "DS1520+": { label: "DS1520+", vw: 244, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 45, 80, 3, 5, 1), extras: [] },
+  "DS1522+": { label: "DS1522+", vw: 244, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 45, 80, 3, 5, 1), extras: [] },
+  "DS1525+": { label: "DS1525+", vw: 244, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 45, 80, 3, 5, 1), extras: [] },
+  "DS1621+": { label: "DS1621+", vw: 286, vh: 90, m2_max: 2, drives: _makeHddRow(4, 5, 44, 80, 3, 6, 1), extras: [] },
+  "DS1819+": { label: "DS1819+", vw: 400, vh: 100, m2_max: 0, drives: _makeHddRow(22, 8, 43, 84, 3, 8, 1), extras: [] },
+  "DS1821+": { label: "DS1821+", vw: 400, vh: 100, m2_max: 2, drives: _makeHddRow(22, 8, 43, 84, 3, 8, 1), extras: [] },
+  "DS2422+": { label: "DS2422+", vw: 560, vh: 100, m2_max: 0, drives: _makeHddRow(22, 8, 42, 84, 3, 12, 1), extras: [] },
+  "RS1221+": { label: "RS1221+", vw: 320, vh: 80, m2_max: 0, drives: _makeHddRow(8, 6, 36, 68, 3, 8, 1), extras: [] },
+  "RS2421+": { label: "RS2421+", vw: 400, vh: 60, m2_max: 0, drives: _makeHddRow(4, 5, 30, 50, 2, 12, 1), extras: [] },
+  "RS3621xs+": { label: "RS3621xs+", vw: 400, vh: 60, m2_max: 0, drives: _makeHddRow(4, 5, 30, 50, 2, 12, 1), extras: [] },
+};
+
+function generateDynamicPanelDef(model, hddCount) {
+  const count = Math.max(1, hddCount || 2);
+  let cols = 4;
+  if (count <= 2) cols = 2;
+  else if (count <= 6) cols = count;
+  else if (count <= 8) cols = 8;
+  else if (count <= 12) cols = 6;
+  else cols = 12;
+
+  const rows = Math.ceil(count / cols);
+  const w = cols > 8 ? 32 : (cols > 5 ? 40 : 47);
+  const h = cols > 8 ? 52 : 78;
+  const gap = 3;
+  const totalW = cols * w + (cols - 1) * gap;
+  const vw = Math.max(140, totalW + 16);
+  const vh = rows * h + (rows - 1) * gap + 12;
+
+  const drives = [];
+  for (let i = 0; i < count; i++) {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const startX = Math.floor((vw - totalW) / 2);
+    drives.push({
+      x: startX + c * (w + gap),
+      y: 6 + r * (h + gap),
+      w,
+      h,
+      type: "hdd",
+      slot: i + 1,
+    });
+  }
+
+  return {
+    label: (model || "").trim() || `Synology (${count}-Bay)`,
+    vw,
+    vh,
+    m2_max: 0,
+    drives,
+    extras: [],
+  };
+}
+
+function findPanelDef(model, hddCount) {
+  const trimmed = (model || "").trim();
+  if (trimmed) {
+    if (SYNOLOGY_PANEL_DEFS[trimmed]) return SYNOLOGY_PANEL_DEFS[trimmed];
+    const upper = trimmed.toUpperCase();
+    const matchedKey = Object.keys(SYNOLOGY_PANEL_DEFS).find((k) => k.toUpperCase() === upper);
+    if (matchedKey) return SYNOLOGY_PANEL_DEFS[matchedKey];
+  }
+  return generateDynamicPanelDef(trimmed, hddCount);
+}
+
+function detectCoresFromModel(hass, pfx) {
+  try {
+    const marker = `sensor.${pfx}_cpu_utilization_total`;
+    const devId = hass?.entities?.[marker]?.device_id;
+    const model = devId ? (hass?.devices?.[devId]?.model || "").trim() : "";
+    if (!model) return null;
+    if (SYNOLOGY_CORES[model]) return SYNOLOGY_CORES[model];
+    const upper = model.toUpperCase();
+    const key = Object.keys(SYNOLOGY_CORES).find((k) => k.toUpperCase() === upper);
+    return key ? SYNOLOGY_CORES[key] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
    Universal Regex-Based Discovery Helpers
    ═══════════════════════════════════════════════════════════════ */
 
 function discoverPrefixes(hass) {
   const out = new Set();
   const sfx = "_cpu_utilization_total";
-  for (const eid of Object.keys(hass.states)) {
+  for (const eid of Object.keys(hass?.states || {})) {
     if (eid.startsWith("sensor.") && eid.endsWith(sfx)) {
       out.add(eid.slice(7, -sfx.length));
     }
@@ -172,7 +287,7 @@ function discoverPrefixes(hass) {
 function discoverIndices(hass, pfx, baseName) {
   const ids = new Set();
   const prefixStr = `sensor.${pfx}_${baseName}_`;
-  for (const eid of Object.keys(hass.states)) {
+  for (const eid of Object.keys(hass?.states || {})) {
     if (eid.startsWith(prefixStr)) {
       const rest = eid.slice(prefixStr.length);
       const idxMatch = rest.match(/^(\d+)_/);
@@ -189,7 +304,7 @@ function detectDriveSlots(hass, pfx) {
   if (indices.length > 0) return indices;
   const fallback = [];
   for (let i = 1; i <= 64; i++) {
-    if (hass.states[`sensor.${pfx}_drive_${i}_status`]) fallback.push(i);
+    if (hass?.states?.[`sensor.${pfx}_drive_${i}_status`]) fallback.push(i);
   }
   return fallback;
 }
@@ -199,7 +314,7 @@ function detectM2Slots(hass, pfx) {
   if (indices.length > 0) return indices;
   const fallback = [];
   for (let i = 1; i <= 16; i++) {
-    if (hass.states[`sensor.${pfx}_m_2_drive_${i}_status`]) fallback.push(i);
+    if (hass?.states?.[`sensor.${pfx}_m_2_drive_${i}_status`]) fallback.push(i);
   }
   return fallback;
 }
@@ -211,21 +326,19 @@ function detectVolumes(hass, pfx) {
   const ids = new Set();
   for (let i = 1; i <= 64; i++) {
     if (
-      hass.states[`sensor.${pfx}_volume_${i}_volume_used`] ||
-      hass.states[`sensor.${pfx}_volume_${i}_used_space`] ||
-      hass.states[`sensor.${pfx}_volume_${i}_used`] ||
-      hass.states[`sensor.${pfx}_volume_${i}_size_used`] ||
-      hass.states[`sensor.${pfx}_volume_${i}_total_size`]
+      hass?.states?.[`sensor.${pfx}_volume_${i}_volume_used`] ||
+      hass?.states?.[`sensor.${pfx}_volume_${i}_used_space`] ||
+      hass?.states?.[`sensor.${pfx}_volume_${i}_used`] ||
+      hass?.states?.[`sensor.${pfx}_volume_${i}_size_used`] ||
+      hass?.states?.[`sensor.${pfx}_volume_${i}_total_size`]
     ) {
       ids.add(i);
     }
   }
-  const mainState = hass.states[`sensor.${pfx}`] || hass.states[`sensor.${pfx}_dsm`];
-  if (mainState && mainState.attributes) {
-    const attrVolumes = mainState.attributes.volumes || mainState.attributes.storage_pools;
-    if (Array.isArray(attrVolumes)) {
-      attrVolumes.forEach((_, idx) => ids.add(idx + 1));
-    }
+  const mainState = hass?.states?.[`sensor.${pfx}`] || hass?.states?.[`sensor.${pfx}_dsm`];
+  const attrVolumes = mainState?.attributes?.volumes || mainState?.attributes?.storage_pools;
+  if (Array.isArray(attrVolumes)) {
+    attrVolumes.forEach((_, idx) => ids.add(idx + 1));
   }
   return [...ids].sort((a, b) => a - b);
 }
@@ -483,8 +596,8 @@ class SynologyNasCard extends HTMLElement {
 
   getCardSize() { return 8; }
 
-  _s(id)       { return this._hass?.states[id]?.state; }
-  _a(id, attr) { return this._hass?.states[id]?.attributes?.[attr]; }
+  _s(id)       { return this._hass?.states?.[id]?.state; }
+  _a(id, attr) { return this._hass?.states?.[id]?.attributes?.[attr]; }
   _num(v, fb)  { const n = parseFloat(v); return isNaN(n) ? fb : n; }
   _e(s)        { return `sensor.${this._config.entity_prefix}_${s}`; }
   _b(s)        { return `binary_sensor.${this._config.entity_prefix}_${s}`; }
@@ -493,16 +606,23 @@ class SynologyNasCard extends HTMLElement {
     return (v == null || v === "unknown" || v === "unavailable") ? null : parseFloat(v);
   }
 
+  _firstExisting(suffixes) {
+    for (const s of suffixes) {
+      const id = this._e(s);
+      if (this._hass?.states?.[id]) return id;
+    }
+    return null;
+  }
+
   _moreInfo(entityId) {
-    if (!entityId) return;
-    if (!this._hass?.states[entityId]) return;
+    if (!entityId || !this._hass?.states?.[entityId]) return;
     const ev = new Event("hass-more-info", { bubbles: true, composed: true });
     ev.detail = { entityId };
     this.dispatchEvent(ev);
   }
 
   _bindMoreInfo(el, entityId) {
-    if (!el || !entityId || !this._hass?.states[entityId]) return;
+    if (!el || !entityId || !this._hass?.states?.[entityId]) return;
     el.classList.add("clickable");
     el.setAttribute("title", entityId);
     el.addEventListener("click", (e) => {
@@ -549,21 +669,21 @@ class SynologyNasCard extends HTMLElement {
   }
 
   _driveBay(i, isM2) {
-    const pfx    = isM2 ? "m_2_drive" : "drive";
+    const pfx      = isM2 ? "m_2_drive" : "drive";
     const statusId = this._e(`${pfx}_${i}_status`);
-    const status = this._s(statusId);
-    const smart  = this._s(this._e(`${pfx}_${i}_status_smart`));
-    const temp   = this._n(this._e(`${pfx}_${i}_temperature`));
-    const badSec = this._s(this._b(`${pfx}_${i}_exceeded_max_bad_sectors`));
-    const remLife= this._s(this._b(`${pfx}_${i}_below_min_remaining_life`));
-    const stAttrs= this._hass?.states[statusId]?.attributes || {};
-    const key    = `${pfx}_${i}`;
-    const isOpen = this._openDrives?.has(key);
+    const drvState = this._s(statusId);
+    const smart    = this._s(this._e(`${pfx}_${i}_status_smart`));
+    const temp     = this._n(this._e(`${pfx}_${i}_temperature`));
+    const badSec   = this._s(this._b(`${pfx}_${i}_exceeded_max_bad_sectors`));
+    const remLife  = this._s(this._b(`${pfx}_${i}_below_min_remaining_life`));
+    const stAttrs  = this._hass?.states?.[statusId]?.attributes || {};
+    const key      = `${pfx}_${i}`;
+    const isOpen   = this._openDrives?.has(key);
 
     const lbl  = isM2 ? `${T.m2} #${i}` : `${T.bay} ${i}`;
     const icon = isM2 ? "\u26a1" : "\ud83d\udcbe";
-    const isNA = !status || status === "unavailable" || status === "unknown";
-    const norm = (status || "").toLowerCase();
+    const isNA = !drvState || drvState === "unavailable" || drvState === "unknown";
+    const norm = (drvState || "").toLowerCase();
     const isHotSpare = ["not_used","not_use","hotspare","hot_spare","nondisk"].includes(norm);
     const isOk = ["normal","initialized"].includes(norm);
 
@@ -575,7 +695,7 @@ class SynologyNasCard extends HTMLElement {
     } else if (isOk) {
       sColor = "var(--success-color,#4caf50)";    sTxt = T.normal;    cssClass = "";
     } else {
-      sColor = "var(--error-color,#f44336)";      sTxt = status;      cssClass = "warning";
+      sColor = "var(--error-color,#f44336)";      sTxt = drvState;    cssClass = "warning";
     }
 
     const w = [];
@@ -625,20 +745,12 @@ class SynologyNasCard extends HTMLElement {
   _raidType(i) {
     const p = this._config.entity_prefix;
     const sid = this._firstExisting([`volume_${i}_status`, `volume_${i}_volume_status`]);
-    const attrs = (sid ? this._hass?.states[sid]?.attributes : null) || {};
-    const mainState = this._hass?.states[`sensor.${p}`] || this._hass?.states[`sensor.${p}_dsm`];
+    const attrs = (sid ? this._hass?.states?.[sid]?.attributes : null) || {};
+    const mainState = this._hass?.states?.[`sensor.${p}`] || this._hass?.states?.[`sensor.${p}_dsm`];
     const attrVol = mainState?.attributes?.volumes?.[i - 1] || mainState?.attributes?.storage_pools?.[i - 1];
     const raw = attrs.device_type || attrs.raid_type || attrs.fs_type || attrVol?.raid_type || attrVol?.device_type || null;
     if (!raw) return null;
     return raw.replace(/_/g, " ").toUpperCase();
-  }
-
-  _firstExisting(suffixes) {
-    for (const s of suffixes) {
-      const id = this._e(s);
-      if (this._hass?.states[id]) return id;
-    }
-    return null;
   }
 
   /* Unit-aware volume parser handling GB, TB, GiB, TiB, MB, PB dynamically */
@@ -663,9 +775,9 @@ class SynologyNasCard extends HTMLElement {
       `volume_${i}_volume_status`,
     ]);
 
-    const usedState = usedId ? this._hass?.states[usedId] : null;
-    const totalState = totalId ? this._hass?.states[totalId] : null;
-    const mainState = this._hass?.states[`sensor.${p}`] || this._hass?.states[`sensor.${p}_dsm`];
+    const usedState = usedId ? this._hass?.states?.[usedId] : null;
+    const totalState = totalId ? this._hass?.states?.[totalId] : null;
+    const mainState = this._hass?.states?.[`sensor.${p}`] || this._hass?.states?.[`sensor.${p}_dsm`];
     const attrVol = mainState?.attributes?.volumes?.[i - 1] || mainState?.attributes?.storage_pools?.[i - 1];
 
     const usedRaw = usedId ? this._n(usedId) : null;
@@ -679,7 +791,7 @@ class SynologyNasCard extends HTMLElement {
       if (unit.includes("TB") || unit.includes("TIB")) return val * 1024;
       if (unit.includes("MB") || unit.includes("MIB")) return val / 1024;
       if (unit.includes("PB") || unit.includes("PIB")) return val * 1024 * 1024;
-      return val; // GB or GiB
+      return val;
     }
 
     const usedGB = usedRaw !== null ? toGB(usedRaw, usedUnit) : (attrVol ? attrVol.used / 1024 / 1024 : 0);
@@ -695,7 +807,7 @@ class SynologyNasCard extends HTMLElement {
     const totalVal = (totalGB / scaleDiv).toFixed(2);
     const freeFormatted = displayUnit === "TB" ? (freeGB / 1024).toFixed(2) + " TB" : freeGB.toFixed(0) + " GB";
 
-    const status = (statusId ? this._s(statusId) : null) || attrVol?.status || "normal";
+    const volStatus = (statusId ? this._s(statusId) : null) || attrVol?.status || "normal";
     const avgT = this._n(this._e(`volume_${i}_average_disk_temp`));
     const maxT = this._n(this._e(`volume_${i}_maximum_disk_temp`));
     const raid = this._raidType(i);
@@ -714,7 +826,7 @@ class SynologyNasCard extends HTMLElement {
           <span class="volume-title">\ud83d\udce6 Volume ${i}</span>
           <div class="volume-badges">
             ${raid ? `<span class="raid-badge">${T.raid}: ${raid}</span>` : ""}
-            <span class="volume-status">${status || "\u2014"}</span>
+            <span class="volume-status">${volStatus || "\u2014"}</span>
           </div>
         </div>
         <div class="volume-bar-container">
@@ -759,7 +871,7 @@ class SynologyNasCard extends HTMLElement {
       const smartBad = smart && smart !== "normal" && smart !== "unknown" && smart !== "unavailable";
       const hasAlert = !isEmpty && !isHotSpare && (isError || smartBad || badSect || lowLife);
 
-      const attrs    = this._hass?.states[sid]?.attributes || {};
+      const attrs    = this._hass?.states?.[sid]?.attributes || {};
       const sizeMB   = attrs.drive_size_mb ?? attrs.disk_size_mb ?? null;
       let capacityTxt = null;
       if (!isEmpty && sizeMB) {
@@ -825,7 +937,7 @@ class SynologyNasCard extends HTMLElement {
       else if (info.smart && info.smart !== "unknown" && info.smart !== "unavailable") smartLedColor = "#f44336";
       const ledX = x + w - 4.5;
       const ledY = y + 6;
-      const smartEid = info.smid && this._hass?.states[info.smid] ? info.smid : info.eid;
+      const smartEid = info.smid && this._hass?.states?.[info.smid] ? info.smid : info.eid;
       const smartGroup = `<g data-entity="${smartEid}" style="cursor:pointer">
         <rect x="${ledX - 6}" y="${ledY - 4}" width="10" height="8" fill="transparent"/>
         <circle cx="${ledX}" cy="${ledY}" r="2" fill="${smartLedColor}" opacity="0.18"/>
@@ -972,7 +1084,7 @@ class SynologyNasCard extends HTMLElement {
 
   _security() {
     const entity = this._b("security_status");
-    const attrs  = this._hass?.states[entity]?.attributes || {};
+    const attrs  = this._hass?.states?.[entity]?.attributes || {};
     const checks = [
       { key: "malware",         label: T.sec_malware,  icon: "\ud83d\udee1\ufe0f" },
       { key: "network",         label: T.sec_network,  icon: "\ud83c\udf10" },
@@ -1049,7 +1161,7 @@ class SynologyNasCard extends HTMLElement {
     const push = (severity, text) => issues.push({ severity, text });
 
     const secEntity = this._b("security_status");
-    const secAttrs  = this._hass?.states[secEntity]?.attributes || {};
+    const secAttrs  = this._hass?.states?.[secEntity]?.attributes || {};
     const skipKeys  = new Set(["friendly_name","device_class","icon","attribution"]);
     for (const [k, v] of Object.entries(secAttrs)) {
       if (typeof v === "string" && v !== "safe" && !skipKeys.has(k)) {
@@ -2072,14 +2184,20 @@ class SynologyNasCardEditor extends HTMLElement {
    Register
    ═══════════════════════════════════════════════════════════════ */
 
-customElements.define("synology-nas-card", SynologyNasCard);
-customElements.define("synology-nas-card-editor", SynologyNasCardEditor);
+if (!customElements.get("synology-nas-card")) {
+  customElements.define("synology-nas-card", SynologyNasCard);
+}
+if (!customElements.get("synology-nas-card-editor")) {
+  customElements.define("synology-nas-card-editor", SynologyNasCardEditor);
+}
 
 window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "synology-nas-card",
-  name: "Synology NAS Monitoring Card",
-  description: "Auto-discovering card for Synology NAS monitoring via the Synology DSM integration",
-  preview: true,
-  documentationURL: "https://github.com/janreimen/HA-Synology-Monitoring-card",
-});
+if (!window.customCards.some((c) => c.type === "synology-nas-card")) {
+  window.customCards.push({
+    type: "synology-nas-card",
+    name: "Synology NAS Monitoring Card",
+    description: "Auto-discovering card for Synology NAS monitoring via the Synology DSM integration",
+    preview: true,
+    documentationURL: "https://github.com/janreimen/HA-Synology-Monitoring-card",
+  });
+}
