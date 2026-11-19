@@ -11,11 +11,11 @@ import {
  * Synology NAS Monitoring Card — Custom Lovelace Card for Home Assistant
  * Visualizes Synology NAS status using the native Synology DSM integration.
  * Extended with dynamic 1–60+ bay SVG generation, regex discovery, and unit-aware storage pools.
- * @version 0.13.0-universal
+ * @version 0.13.1-universal
  * @license MIT
  */
 
-const CARD_VERSION = "0.13.0-universal";
+const CARD_VERSION = "0.13.1-universal";
 
 console.info(
   `%c SYNOLOGY-NAS-CARD %c v${CARD_VERSION} `,
@@ -187,7 +187,6 @@ function discoverIndices(hass, pfx, baseName) {
 function detectDriveSlots(hass, pfx) {
   const indices = discoverIndices(hass, pfx, "drive");
   if (indices.length > 0) return indices;
-  // Fallback scan for generic naming
   const fallback = [];
   for (let i = 1; i <= 64; i++) {
     if (hass.states[`sensor.${pfx}_drive_${i}_status`]) fallback.push(i);
@@ -213,6 +212,7 @@ function detectVolumes(hass, pfx) {
   for (let i = 1; i <= 64; i++) {
     if (
       hass.states[`sensor.${pfx}_volume_${i}_volume_used`] ||
+      hass.states[`sensor.${pfx}_volume_${i}_used_space`] ||
       hass.states[`sensor.${pfx}_volume_${i}_used`] ||
       hass.states[`sensor.${pfx}_volume_${i}_size_used`] ||
       hass.states[`sensor.${pfx}_volume_${i}_total_size`]
@@ -229,9 +229,6 @@ function detectVolumes(hass, pfx) {
   }
   return [...ids].sort((a, b) => a - b);
 }
-
-// Hardware knowledge base is maintained in separate ES modules.
-// This card file is therefore an ES module and must be bundled for single-resource HACS deployment.
 
 function prettyName(pfx) {
   const m = pfx.match(/synology[_\s]*((?:ds|rs|fs|sa|dvr|uc)\d{3,5})/i);
@@ -358,7 +355,11 @@ class SynologyNasCard extends HTMLElement {
       this._e("temperature"),
       ...drvSlots.map((i) => this._e(`drive_${i}_temperature`)),
       ...m2sl.map((i) => this._e(`m_2_drive_${i}_temperature`)),
-    ].filter(Boolean);
+    ].filter((eid) => eid && this._hass?.states?.[eid]);
+    if (!entities.length) {
+      this._historyFetching = false;
+      return;
+    }
     try {
       const start = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
       const res = await this._hass.callWS({
@@ -373,9 +374,9 @@ class SynologyNasCard extends HTMLElement {
       for (const eid of entities) {
         const arr = res?.[eid] || [];
         next[eid] = arr
-          .map((p) => {
-            const v = parseFloat(p.s);
-            const t = p.lu ? p.lu * 1000 : (p.last_updated ? new Date(p.last_updated).getTime() : null);
+          .map((pt) => {
+            const v = parseFloat(pt.s);
+            const t = pt.lu ? pt.lu * 1000 : (pt.last_updated ? new Date(pt.last_updated).getTime() : null);
             return (isNaN(v) || t == null) ? null : { t, v };
           })
           .filter(Boolean);
@@ -400,7 +401,7 @@ class SynologyNasCard extends HTMLElement {
     } else {
       const vs = pts.map((p) => p.v);
       min = Math.min(...vs); max = Math.max(...vs);
-      if (max - min < 0.01) { max = min + 1; }
+      if (max - min < 0.01) max = min + 1;
     }
     const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
     const span = Math.max(1, t1 - t0);
@@ -732,7 +733,7 @@ class SynologyNasCard extends HTMLElement {
       </div>
     </div>`;
   }
-  
+
   _frontPanel(panelDef, hddSlots, m2Slots) {
     const { vw, vh, drives } = panelDef;
     const thr = this._config.thresholds || {};
@@ -758,25 +759,6 @@ class SynologyNasCard extends HTMLElement {
       const smartBad = smart && smart !== "normal" && smart !== "unknown" && smart !== "unavailable";
       const hasAlert = !isEmpty && !isHotSpare && (isError || smartBad || badSect || lowLife);
 
-      let trayFill;
-      if      (isEmpty)     trayFill = "#0d0d0d";
-      else if (isHotSpare)  trayFill = "#04040f";
-      else if (isNormal)    trayFill = "#04100a";
-      else                  trayFill = "#120404";
-
-      let borderStroke;
-      if      (isEmpty || temp === null)    borderStroke = "#222";
-      else if (temp >= driveTempHot)        borderStroke = "#f44336";
-      else if (temp >= driveTempWarn)       borderStroke = "#ff6b00";
-      else                                  borderStroke = "#2a5c2a";
-
-      let ledColor;
-      if      (isEmpty)              ledColor = null;
-      else if (isHotSpare)           ledColor = "#2196f3";
-      else if (smart === "normal")   ledColor = "#4caf50";
-      else if (smart && smart !== "unavailable" && smart !== "unknown") ledColor = "#f44336";
-      else                           ledColor = "#4caf50";
-
       const attrs    = this._hass?.states[sid]?.attributes || {};
       const sizeMB   = attrs.drive_size_mb ?? attrs.disk_size_mb ?? null;
       let capacityTxt = null;
@@ -785,8 +767,7 @@ class SynologyNasCard extends HTMLElement {
         capacityTxt = tb >= 0.95 ? `${tb.toFixed(1)}T` : `${(sizeMB / 1024).toFixed(0)}G`;
       }
 
-      return { isEmpty, isHotSpare, isNormal, isError, hasAlert, trayFill, borderStroke, ledColor, temp,
-               eid: sid, tid, smid, smart, capacityTxt };
+      return { isEmpty, isHotSpare, isNormal, isError, hasAlert, temp, eid: sid, tid, smid, smart, capacityTxt };
     };
 
     const renderSlot = (x, y, w, h, type, slot) => {
@@ -944,7 +925,7 @@ class SynologyNasCard extends HTMLElement {
     const ICON_UNLOCK = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 1a5 5 0 0 0-5 5h2a3 3 0 0 1 6 0v3H5v13h14V9h-5V6a5 5 0 0 0-2-5z"/></svg>`;
     const ICON_REBOOT = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>`;
     const ICON_POWER  = `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.97 6.97 0 0 1 19 12a7 7 0 1 1-14 0c0-2.05 1.05-3.85 2.59-4.92L6.17 5.65A8.97 8.97 0 0 0 3 12a9 9 0 1 0 18 0c0-2.74-1.23-5.18-3.17-6.83z"/></svg>`;
-    
+
     const overlayTopPct = ((headerH / 2) / totalH) * 100;
     const powerOverlay = showPower ? `
       <div class="front-panel-power-overlay" style="top: ${overlayTopPct.toFixed(2)}%;">
@@ -1099,10 +1080,12 @@ class SynologyNasCard extends HTMLElement {
     }
 
     for (const i of detectVolumes(this._hass, p)) {
-      const pct = this._n(this._e(`volume_${i}_volume_used`));
+      const pctId = this._firstExisting([`volume_${i}_volume_used`, `volume_${i}_used_percent`]);
+      const pct = pctId ? this._n(pctId) : null;
       if (pct !== null && pct >= 95)      push("critical", `Volume ${i}: ${pct}% used`);
       else if (pct !== null && pct >= 90) push("warning",  `Volume ${i}: ${pct}% used`);
-      const vs = (this._s(this._e(`volume_${i}_status`)) || "").toLowerCase();
+      const stId = this._firstExisting([`volume_${i}_status`, `volume_${i}_volume_status`]);
+      const vs = ((stId ? this._s(stId) : "") || "").toLowerCase();
       if (vs && !["normal","unknown","unavailable"].includes(vs))
         push("critical", `Volume ${i}: status "${vs}"`);
     }
@@ -1155,12 +1138,12 @@ class SynologyNasCard extends HTMLElement {
     const dsmV     = this._a(`update.${p}_dsm_update`, "installed_version");
     const dsmL     = this._a(`update.${p}_dsm_update`, "latest_version");
 
-    const issues  = this._collectIssues();
+    const issues    = this._collectIssues();
     const nCritical = issues.filter((x) => x.severity === "critical").length;
     const nWarning  = issues.filter((x) => x.severity === "warning").length;
     const nInfo     = issues.filter((x) => x.severity === "info").length;
-    const worst   = nCritical ? "critical" : nWarning ? "warning" : nInfo ? "info" : "ok";
-    const hasUpd  = dsmV && dsmL && dsmV !== dsmL;
+    const worst     = nCritical ? "critical" : nWarning ? "warning" : nInfo ? "info" : "ok";
+    const hasUpd    = dsmV && dsmL && dsmV !== dsmL;
 
     const dsmDisplay = dsmV ? dsmV.replace(/^DSM\s+/i, "") : "";
     const dsmLatest  = dsmL ? dsmL.replace(/^DSM\s+/i, "") : "";
@@ -1337,6 +1320,16 @@ class SynologyNasCard extends HTMLElement {
       });
     }
 
+    this.shadowRoot.querySelectorAll("[data-sec-key]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const key = el.getAttribute("data-sec-key");
+        if (!key) return;
+        if (this._openSecKeys.has(key)) this._openSecKeys.delete(key);
+        else this._openSecKeys.add(key);
+        this._render();
+      });
+    });
+
     this.shadowRoot.querySelectorAll("[data-expand-drive]").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1364,14 +1357,10 @@ class SynologyNasCard extends HTMLElement {
     const rb = this.shadowRoot.getElementById("btn-reboot");
     if (rb && this._powerUnlocked) {
       rb.addEventListener("click", () => {
-        if (confirm(T.confirm_reboot_1)) {
-          if (confirm(T.confirm_reboot_2)) {
-            this._hass.callService("button", "press", {
-              entity_id: `button.${p}_reboot`,
-            });
-            this._powerUnlocked = false;
-            this._render();
-          }
+        if (confirm(T.confirm_reboot_1) && confirm(T.confirm_reboot_2)) {
+          this._hass.callService("button", "press", { entity_id: `button.${p}_reboot` });
+          this._powerUnlocked = false;
+          this._render();
         }
       });
     }
@@ -1379,14 +1368,10 @@ class SynologyNasCard extends HTMLElement {
     const sd = this.shadowRoot.getElementById("btn-shutdown");
     if (sd && this._powerUnlocked) {
       sd.addEventListener("click", () => {
-        if (confirm(T.confirm_shutdown_1)) {
-          if (confirm(T.confirm_shutdown_2)) {
-            this._hass.callService("button", "press", {
-              entity_id: `button.${p}_shutdown`,
-            });
-            this._powerUnlocked = false;
-            this._render();
-          }
+        if (confirm(T.confirm_shutdown_1) && confirm(T.confirm_shutdown_2)) {
+          this._hass.callService("button", "press", { entity_id: `button.${p}_shutdown` });
+          this._powerUnlocked = false;
+          this._render();
         }
       });
     }
@@ -1396,9 +1381,7 @@ class SynologyNasCard extends HTMLElement {
       upd.addEventListener("click", (e) => {
         e.stopPropagation();
         if (confirm(T.confirm_update)) {
-          this._hass.callService("update", "install", {
-            entity_id: `update.${p}_dsm_update`,
-          });
+          this._hass.callService("update", "install", { entity_id: `update.${p}_dsm_update` });
         }
       });
     }
