@@ -1,12 +1,13 @@
+
 /**
  * Synology NAS Monitoring Card — Custom Lovelace Card for Home Assistant
  * Visualizes Synology NAS status using the native Synology DSM integration.
  * Extended with dynamic 1–60+ bay SVG generation, regex discovery, and unit-aware storage pools.
- * @version 0.13.2-universal
+ * @version 0.13.3-universal
  * @license MIT
  */
 
-const CARD_VERSION = "0.13.2-universal";
+const CARD_VERSION = "0.13.3-universal";
 
 console.info(
   `%c SYNOLOGY-NAS-CARD %c v${CARD_VERSION} `,
@@ -341,6 +342,180 @@ function detectVolumes(hass, pfx) {
     attrVolumes.forEach((_, idx) => ids.add(idx + 1));
   }
   return [...ids].sort((a, b) => a - b);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Volume data resolution + size formatting
+   Every volume is resolved on its own: sizes are normalised to bytes
+   (honouring the unit each HA entity reports) and only formatted at the
+   very end, each value in the unit that suits it.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Bytes per unit. HA's TB/GB/MB are decimal (1000-based), TiB/GiB/MiB binary. */
+const UNIT_BYTES = {
+  b: 1,
+  kb: 1e3, mb: 1e6, gb: 1e9, tb: 1e12, pb: 1e15,
+  kib: 1024, mib: 1024 ** 2, gib: 1024 ** 3, tib: 1024 ** 4, pib: 1024 ** 5,
+};
+
+function unitBytes(unit) {
+  const key = String(unit ?? "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(UNIT_BYTES, key) ? UNIT_BYTES[key] : null;
+}
+
+function numOrNull(v) {
+  if (v == null || v === "" || v === "unknown" || v === "unavailable") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/* Decimals the state string really carries: "0.01" → 2, "6.4e-05" → 6. */
+function stateDecimals(stateObj) {
+  const m = String(stateObj?.state ?? "").trim().match(/^[+-]?\d*\.?(\d*)(?:[eE]([+-]?\d+))?$/);
+  if (!m) return 0;
+  return Math.max(0, (m[1] || "").length - parseInt(m[2] || "0", 10));
+}
+
+/* A size sensor → { bytes, step (resolution of the last digit, in bytes), binary }. */
+function readSize(stateObj) {
+  const raw = numOrNull(stateObj?.state);
+  if (raw === null) return null;
+  const unit = stateObj.attributes?.unit_of_measurement;
+  const mult = unitBytes(unit ?? "TB"); // entities without a unit attribute were always TB
+  if (mult === null) return null;
+  return {
+    bytes: raw * mult,
+    step: mult * Math.pow(10, -stateDecimals(stateObj)),
+    binary: /ib$/i.test(String(unit ?? "")),
+  };
+}
+
+/* Resolution of the volume percentage sensor, in percentage points. */
+const PCT_STEP = 0.1;
+/* Below this fill level "used ÷ percentage" is too imprecise to derive a total from. */
+const MIN_PCT_FOR_TOTAL = 1;
+
+function resolveVolume(hass, pfx, i) {
+  const pick = (suffixes) => {
+    for (const s of suffixes) {
+      const id = `sensor.${pfx}_${s}`;
+      if (hass?.states?.[id]) return id;
+    }
+    return null;
+  };
+  const ids = {
+    used:   pick([`volume_${i}_used_space`, `volume_${i}_size_used`, `volume_${i}_used`]),
+    total:  pick([`volume_${i}_total_size`, `volume_${i}_size_total`, `volume_${i}_total`]),
+    pct:    pick([`volume_${i}_volume_used`, `volume_${i}_used_percent`]),
+    status: pick([`volume_${i}_status`, `volume_${i}_volume_status`]),
+  };
+
+  const used  = ids.used  ? readSize(hass.states[ids.used])  : null;
+  const total = ids.total ? readSize(hass.states[ids.total]) : null;
+
+  /* Optional attribute-based source. No known integration exposes it; values are
+     assumed to be bytes. */
+  const main = hass?.states?.[`sensor.${pfx}`] || hass?.states?.[`sensor.${pfx}_dsm`];
+  const attrVol = main?.attributes?.volumes?.[i - 1] || main?.attributes?.storage_pools?.[i - 1];
+
+  let usedB  = used ? used.bytes : numOrNull(attrVol?.used);
+  let totalB = total ? total.bytes : numOrNull(attrVol?.total);
+  if (totalB !== null && totalB <= 0) totalB = null;
+
+  /* The percentage sensor only has 0.1 % resolution (py-synologydsm-api rounds it),
+     so it is a fallback, not the primary source. */
+  const pctIn = (ids.pct ? numOrNull(hass.states[ids.pct].state) : null)
+    ?? numOrNull(attrVol?.percent ?? attrVol?.used_pct);
+  const pctHalfStep = PCT_STEP / 2; // percentage points
+
+  /* usedErr / totalErr: half-width of each value's uncertainty in bytes (0 = exact).
+     fmtSize() uses them so a derived value never shows more digits than it has. */
+  let usedErr  = used  ? used.step  / 2 : 0;
+  let totalErr = total ? total.step / 2 : 0;
+  let usedApprox = false;
+  let totalApprox = false;
+  let pct = pctIn;
+
+  if (usedB !== null && totalB !== null) {
+    const pctErr = totalB * pctHalfStep / 100;
+    if (pctIn !== null && pctErr < usedErr) {
+      /* Coarse used-space sensor (older HA versions: 1 decimal): the percentage
+         pins the value down more tightly. */
+      usedB = (pctIn / 100) * totalB;
+      usedErr = pctErr;
+      usedApprox = true;
+    } else {
+      /* Current HA reports full-precision sizes: the exact ratio beats the sensor. */
+      pct = (usedB / totalB) * 100;
+    }
+  } else if (pctIn !== null) {
+    if (usedB === null && totalB !== null) {
+      usedB = (pctIn / 100) * totalB;
+      usedErr = (totalB * pctHalfStep) / 100;
+      usedApprox = true;
+    } else if (totalB === null && usedB !== null && pctIn >= MIN_PCT_FOR_TOTAL) {
+      /* HA ships the "Total size" volume sensor disabled by default: rebuild it from
+         used space and percentage. Only worth showing once the percentage is big
+         enough that its rounding does not swamp the result. */
+      totalB = usedB / (pctIn / 100);
+      totalErr = (totalB * pctHalfStep) / pctIn;
+      totalApprox = true;
+    }
+  }
+
+  const haveFree = usedB !== null && totalB !== null;
+  return {
+    index: i,
+    ids,
+    pct,
+    usedBytes: usedB,
+    totalBytes: totalB,
+    freeBytes: haveFree ? Math.max(0, totalB - usedB) : null,
+    usedErr,
+    totalErr,
+    freeErr: usedErr + totalErr,
+    usedApprox,
+    totalApprox,
+    binary: !!(total?.binary || used?.binary),
+  };
+}
+
+/* 6.44 GB / 1.06 TB / 15.34 TB — each value in its own unit, never "0.00 TB".
+   `err` (bytes, half-width of the value's uncertainty) caps the decimals so a value
+   derived from a rounded percentage reads "6 GB", not "6.36 GB". */
+function fmtSize(bytes, binary = false, err = 0) {
+  if (bytes == null || !Number.isFinite(bytes)) return "—";
+  const b = Math.max(0, bytes);
+  const base = binary ? 1024 : 1000;
+  const labels = binary ? ["MiB", "GiB", "TiB", "PiB"] : ["MB", "GB", "TB", "PB"];
+  const decimalsFor = (u, v) => {
+    const usual = u === 0 ? 0 : u === 1 ? (v >= 100 ? 0 : v >= 10 ? 1 : 2) : 2;
+    if (!(err > 0)) return usual;
+    const widthInUnit = (2 * err) / Math.pow(base, u + 2);
+    return Math.min(usual, Math.max(0, Math.ceil(-Math.log10(widthInUnit))));
+  };
+  let u = 0;
+  while (u < labels.length - 1 && b >= Math.pow(base, u + 3)) u++;
+  let v = b / Math.pow(base, u + 2);
+  let s = v.toFixed(decimalsFor(u, v));
+  if (u < labels.length - 1 && parseFloat(s) >= base) { // 999.7 GB → 1.00 TB, not "1000 GB"
+    u++;
+    v = b / Math.pow(base, u + 2);
+    s = v.toFixed(decimalsFor(u, v));
+  }
+  return `${s} ${labels[u]}`;
+}
+
+/* fmtSize() plus a "~" prefix for values that were derived rather than measured. */
+function fmtSizeApprox(bytes, binary, err, approx) {
+  const s = fmtSize(bytes, binary, err);
+  return approx && bytes != null && Number.isFinite(bytes) ? `~${s}` : s;
+}
+
+function fmtPct(p) {
+  if (p == null || !Number.isFinite(p)) return "—";
+  if (p > 0 && p < 0.1) return "<0.1%";
+  return `${Number(p.toFixed(1))}%`;
 }
 
 function prettyName(pfx) {
@@ -753,61 +928,17 @@ class SynologyNasCard extends HTMLElement {
     return raw.replace(/_/g, " ").toUpperCase();
   }
 
-  /* Unit-aware volume parser handling GB, TB, GiB, TiB, MB, PB dynamically */
+  /* One volume card. All numbers come from resolveVolume(); this only renders. */
   _volume(i) {
     const p = this._config.entity_prefix;
-    const usedId = this._firstExisting([
-      `volume_${i}_used_space`,
-      `volume_${i}_size_used`,
-      `volume_${i}_used`,
-    ]);
-    const totalId = this._firstExisting([
-      `volume_${i}_total_size`,
-      `volume_${i}_size_total`,
-      `volume_${i}_total`,
-    ]);
-    const pctId = this._firstExisting([
-      `volume_${i}_volume_used`,
-      `volume_${i}_used_percent`,
-    ]);
-    const statusId = this._firstExisting([
-      `volume_${i}_status`,
-      `volume_${i}_volume_status`,
-    ]);
-
-    const usedState = usedId ? this._hass?.states?.[usedId] : null;
-    const totalState = totalId ? this._hass?.states?.[totalId] : null;
+    const v = resolveVolume(this._hass, p, i);
     const mainState = this._hass?.states?.[`sensor.${p}`] || this._hass?.states?.[`sensor.${p}_dsm`];
     const attrVol = mainState?.attributes?.volumes?.[i - 1] || mainState?.attributes?.storage_pools?.[i - 1];
 
-    const usedRaw = usedId ? this._n(usedId) : null;
-    const totalRaw = totalId ? this._n(totalId) : null;
-    const pctRaw = pctId ? this._n(pctId) : null;
-    const usedUnit = (usedState?.attributes?.unit_of_measurement || "TB").toUpperCase();
-    const totalUnit = (totalState?.attributes?.unit_of_measurement || "TB").toUpperCase();
+    const pct = v.pct;
+    const barPct = pct == null ? 0 : Math.min(100, Math.max(0, pct));
 
-    function toGB(val, unit) {
-      if (val === null) return 0;
-      if (unit.includes("TB") || unit.includes("TIB")) return val * 1024;
-      if (unit.includes("MB") || unit.includes("MIB")) return val / 1024;
-      if (unit.includes("PB") || unit.includes("PIB")) return val * 1024 * 1024;
-      return val;
-    }
-
-    const usedGB = usedRaw !== null ? toGB(usedRaw, usedUnit) : (attrVol ? attrVol.used / 1024 / 1024 : 0);
-    const totalGB = totalRaw !== null ? toGB(totalRaw, totalUnit) : (attrVol ? attrVol.total / 1024 / 1024 : 0);
-    const freeGB = Math.max(0, totalGB - usedGB);
-    const pct = pctRaw !== null
-      ? Number(pctRaw.toFixed(1))
-      : (totalGB > 0 ? Number(((usedGB / totalGB) * 100).toFixed(1)) : (attrVol?.percent ?? attrVol?.used_pct ?? null));
-
-    const displayUnit = totalGB >= 1024 ? "TB" : "GB";
-    const scaleDiv = displayUnit === "TB" ? 1024 : 1;
-    const usedVal = (usedGB / scaleDiv).toFixed(2);
-    const totalVal = (totalGB / scaleDiv).toFixed(2);
-    const freeFormatted = displayUnit === "TB" ? (freeGB / 1024).toFixed(2) + " TB" : freeGB.toFixed(0) + " GB";
-
-    const volStatus = (statusId ? this._s(statusId) : null) || attrVol?.status || "normal";
+    const volStatus = (v.ids.status ? this._s(v.ids.status) : null) || attrVol?.status || "normal";
     const avgT = this._n(this._e(`volume_${i}_average_disk_temp`));
     const maxT = this._n(this._e(`volume_${i}_maximum_disk_temp`));
     const raid = this._raidType(i);
@@ -818,7 +949,7 @@ class SynologyNasCard extends HTMLElement {
       else if (pct >= 75) bc = "var(--warning-color,#ff9800)";
     }
 
-    const clickEntity = usedId || pctId || totalId || "";
+    const clickEntity = v.ids.used || v.ids.pct || v.ids.total || "";
 
     return `<div class="volume-card" data-volume-id="${i}">
       <div class="volume-body" data-entity="${clickEntity}">
@@ -830,12 +961,12 @@ class SynologyNasCard extends HTMLElement {
           </div>
         </div>
         <div class="volume-bar-container">
-          <div class="volume-bar" style="width:${pct ?? 0}%;background:${bc}"></div>
+          <div class="volume-bar" style="width:${barPct}%;background:${bc}"></div>
         </div>
         <div class="volume-details">
-          <span>${pct != null ? pct + "%" : "\u2014"} ${T.used}</span>
-          <span>${usedVal} / ${totalVal} ${displayUnit}</span>
-          <span>${freeFormatted} ${T.free}</span>
+          <span>${fmtPct(pct)} ${T.used}</span>
+          <span>${fmtSizeApprox(v.usedBytes, v.binary, v.usedErr, v.usedApprox)} / ${fmtSizeApprox(v.totalBytes, v.binary, v.totalErr, v.totalApprox)}</span>
+          <span>${fmtSizeApprox(v.freeBytes, v.binary, v.freeErr, v.usedApprox || v.totalApprox)} ${T.free}</span>
         </div>
         ${avgT != null || maxT != null ? `
         <div class="volume-temps">
@@ -1192,12 +1323,11 @@ class SynologyNasCard extends HTMLElement {
     }
 
     for (const i of detectVolumes(this._hass, p)) {
-      const pctId = this._firstExisting([`volume_${i}_volume_used`, `volume_${i}_used_percent`]);
-      const pct = pctId ? this._n(pctId) : null;
-      if (pct !== null && pct >= 95)      push("critical", `Volume ${i}: ${pct}% used`);
-      else if (pct !== null && pct >= 90) push("warning",  `Volume ${i}: ${pct}% used`);
-      const stId = this._firstExisting([`volume_${i}_status`, `volume_${i}_volume_status`]);
-      const vs = ((stId ? this._s(stId) : "") || "").toLowerCase();
+      const vol = resolveVolume(this._hass, p, i);
+      const pct = vol.pct;
+      if (pct !== null && pct >= 95)      push("critical", `Volume ${i}: ${fmtPct(pct)} used`);
+      else if (pct !== null && pct >= 90) push("warning",  `Volume ${i}: ${fmtPct(pct)} used`);
+      const vs = ((vol.ids.status ? this._s(vol.ids.status) : "") || "").toLowerCase();
       if (vs && !["normal","unknown","unavailable"].includes(vs))
         push("critical", `Volume ${i}: status "${vs}"`);
     }
@@ -2201,3 +2331,4 @@ if (!window.customCards.some((c) => c.type === "synology-nas-card")) {
     documentationURL: "https://github.com/janreimen/HA-Synology-Monitoring-card",
   });
 }
+
