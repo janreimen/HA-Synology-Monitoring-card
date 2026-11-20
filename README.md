@@ -233,9 +233,22 @@ The data module records the snapshot date and provenance notes for the registry.
 - RAID type is read from the `device_type` / `raid_type` attribute of the volume status entity
 - If your DSM integration version doesn't expose this attribute, the badge is simply hidden
 
+### Volume shows "—" for total size / free space (or a "~" in front of a number)
+- Home Assistant ships each **Volume N Total size** sensor **disabled by default**. Enable it under *Settings → Devices & services → Synology DSM → entities* (show disabled entities) for exact totals.
+- Without it the card rebuilds the total from *used space ÷ percentage used* and marks it with `~`. The percentage sensor is only accurate to 0.1 %, so below 1 % used the total cannot be derived reliably and the card shows `—` instead of a made-up number.
+- A `~` also appears on used/free space when the used-space sensor is missing or reports too few decimals (older HA versions) and the value had to be derived from the percentage.
+
 ---
 
 ## Changelog
+
+### v0.13.3
+- **Volume sizes are no longer squashed into "0.00 TB".** Every volume is resolved on its own and each value is printed in the unit that suits it, e.g. `6.40 GB / 1.06 TB` and `2.80 GB / 2.77 TB` instead of `0.01 / 1.06 TB` and `0.00 / 2.77 TB`. Previously one fixed unit with two decimals was chosen from the total size, so any volume with little data on it lost all of its used-space information.
+- **Percentage used is computed from used ÷ total** when both sensors are available (HA reports them at full precision). The percentage sensor itself is rounded to 0.1 % by the DSM library and is now only a fallback. Volumes under 0.1 % show `<0.1%` instead of `0%`.
+- **Unit handling fixed.** HA's TB/GB are decimal (1000-based) and TiB/GiB binary; the old code multiplied TB by 1024 and labelled TiB values as "TB". Each entity's own `unit_of_measurement` is now honoured.
+- **Disabled "Total size" sensor no longer breaks the card.** Before: `434.18 / 0.00 GB`, `0 GB free`. Now the total is rebuilt from used space and percentage and marked `~`, or shown as `—` when the percentage is too small to derive it from.
+- **Rounding edge:** 999.7 GB now reads `1.00 TB`, not `1000 GB`.
+- Volume alerts (≥ 90 % warning, ≥ 95 % critical) use the same per-volume numbers.
 
 ### Hardware knowledge base integration (development package)
 - Added a modular Synology hardware registry covering 128 model records across multiple product families.
